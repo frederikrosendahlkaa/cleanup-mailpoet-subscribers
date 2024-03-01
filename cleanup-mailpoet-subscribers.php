@@ -161,8 +161,8 @@ function ncm_mailpoet_delete_subscribers_from_trash() {
 /**
  * every hour schedule events
  */
-add_action( 'init', 'ncm_mailpoet_move_subscribers_to_trash_cron' );
-function ncm_mailpoet_move_subscribers_to_trash_cron() {
+add_action( 'init', 'ncm_mailpoet_cron_schedule' );
+function ncm_mailpoet_cron_schedule() {
 
     //scheduled the diffrent events with 10 minute apart to avoid all events running at the same time
     if ( ! wp_next_scheduled( 'ncm_mailpoet_delete_subscribers_from_trash' ) ) {
