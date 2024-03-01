@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  * Cron job to move inactive subscribers to the trash
  */
 
-add_action( 'ncm_mailpoet_move_subscribers_to_trash_event', 'ncm_mailpoet_move_subscribers_to_trash', 10, 1);
+add_action( 'ncm_mailpoet_move_subscribers_to_trash', 'ncm_mailpoet_move_subscribers_to_trash', 10, 1);
 function ncm_mailpoet_move_subscribers_to_trash( $status ) {
 
     //get log from options
@@ -92,7 +92,7 @@ function ncm_mailpoet_move_subscribers_to_trash( $status ) {
 /**
  * every hour run ncm_mailpoet_delete_subscribers_from_trash
  */
-add_action( 'ncm_mailpoet_delete_subscribers_from_trash_event', 'ncm_mailpoet_delete_subscribers_from_trash' );
+add_action( 'ncm_mailpoet_delete_subscribers_from_trash', 'ncm_mailpoet_delete_subscribers_from_trash' );
 function ncm_mailpoet_delete_subscribers_from_trash() {
 
     $mailpoet_api = false;
@@ -165,21 +165,21 @@ add_action( 'init', 'ncm_mailpoet_move_subscribers_to_trash_cron' );
 function ncm_mailpoet_move_subscribers_to_trash_cron() {
 
     //scheduled the diffrent events with 10 minute apart to avoid all events running at the same time
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_delete_subscribers_from_trash_event' ) ) {
-        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_delete_subscribers_from_trash_event' );
+    if ( ! wp_next_scheduled( 'ncm_mailpoet_delete_subscribers_from_trash' ) ) {
+        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_delete_subscribers_from_trash' );
     }
 
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'inactive' ) ) ) {
-        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'inactive' ) );
+    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) ) ) {
+        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) );
     }
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unconfirmed' ) ) ) {
-        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unconfirmed' ) );
+    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) ) ) {
+        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) );
     }
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unsubscribed' ) ) ) {
-        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unsubscribed' ) );
+    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) ) ) {
+        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) );
     }
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'bounced' ) ) ) {
-        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'bounced' ) );
+    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) ) ) {
+        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) );
     }
 }
 
@@ -190,24 +190,24 @@ register_activation_hook( __FILE__, 'ncm_mailpoet_activate' );
 function ncm_mailpoet_activate() {
     
     //scheduled the diffrent events with 10 minute apart to avoid all events running at the same time
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_delete_subscribers_from_trash_event' ) ) {
-        wp_schedule_event( time() + 600, 'hourly', 'ncm_mailpoet_delete_subscribers_from_trash_event' );
+    if ( ! wp_next_scheduled( 'ncm_mailpoet_delete_subscribers_from_trash' ) ) {
+        wp_schedule_event( time() + 600, 'hourly', 'ncm_mailpoet_delete_subscribers_from_trash' );
     }
 
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'inactive' ) ) ) {
-        wp_schedule_event( time() + 1200, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'inactive' ) );
+    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) ) ) {
+        wp_schedule_event( time() + 1200, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) );
     }
 
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unconfirmed' ) ) ) {
-        wp_schedule_event( time() + 1800, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unconfirmed' ) );
+    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) ) ) {
+        wp_schedule_event( time() + 1800, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) );
     }
 
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unsubscribed' ) ) ) {
-        wp_schedule_event( time() + 2400, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unsubscribed' ) );
+    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) ) ) {
+        wp_schedule_event( time() + 2400, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) );
     }
 
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'bounced' ) ) ) {
-        wp_schedule_event( time() + 3000, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'bounced' ) );
+    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) ) ) {
+        wp_schedule_event( time() + 3000, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) );
     }
 
 }
@@ -218,11 +218,11 @@ function ncm_mailpoet_activate() {
  */
 register_deactivation_hook( __FILE__, 'ncm_mailpoet_deactivate' );
 function ncm_mailpoet_deactivate() {
-    wp_clear_scheduled_hook( 'ncm_mailpoet_delete_subscribers_from_trash_event' );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'inactive' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unconfirmed' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unsubscribed' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'bounced' ) );
+    wp_clear_scheduled_hook( 'ncm_mailpoet_delete_subscribers_from_trash' );
+    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) );
+    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) );
+    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) );
+    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) );
 }
 
 /**
@@ -230,10 +230,10 @@ function ncm_mailpoet_deactivate() {
  */
 register_uninstall_hook( __FILE__, 'ncm_mailpoet_uninstall' );
 function ncm_mailpoet_uninstall() {
-    wp_clear_scheduled_hook( 'ncm_mailpoet_delete_subscribers_from_trash_event' );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'inactive' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unconfirmed' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'unsubscribed' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash_event', array( 'bounced' ) );
+    wp_clear_scheduled_hook( 'ncm_mailpoet_delete_subscribers_from_trash' );
+    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) );
+    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) );
+    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) );
+    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) );
     delete_option( 'cleanup_mailpoet_subscribers_log' );
 }
