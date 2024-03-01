@@ -23,6 +23,17 @@ if ( ! defined( 'ABSPATH' ) ) {
 add_action( 'CMS24_move_subscribers_to_trash_event', 'CMS24_move_subscribers_to_trash', 10, 1);
 function CMS24_move_subscribers_to_trash( $status ) {
 
+    //get log from options
+    $log = get_option( 'cleanup_mailpoet_subscribers_log' );
+    if ( ! $log ) {
+        $log = array();
+        $log[$status] = 0;
+    } else {
+        if ( !key_exists( $status, $log ) ) {
+            $log[$status] = 0;
+        }
+    }
+
     $mailpoet_api = false;
     if (class_exists(\MailPoet\API\API::class)) {
         $mailpoet_api = \MailPoet\API\API::MP('v1');
@@ -66,9 +77,15 @@ function CMS24_move_subscribers_to_trash( $status ) {
             //in $prefix . 'mailpoet_subscribers' column 'deleted_at' set to now
             $wpdb->update( $prefix . 'mailpoet_subscribers', array( 'deleted_at' => current_time( 'mysql' ) ), array( 'id' => $subscriber['id'] ) );
 
+            //add to log
+            $log[$status] = $log[$status] + 1;
+
         }
 
     }
+
+    //update log
+    update_option( 'cleanup_mailpoet_subscribers_log', $log );
 
 }
 
@@ -82,6 +99,18 @@ function CMS24_delete_subscribers_from_trash() {
     if (class_exists(\MailPoet\API\API::class)) {
         $mailpoet_api = \MailPoet\API\API::MP('v1');
     }
+
+    //get log from options
+    $log = get_option( 'cleanup_mailpoet_subscribers_log' );
+    if ( ! $log ) {
+        $log = array();
+        $log['deleted'] = 0;
+    } else {
+        if ( !key_exists( 'deleted', $log ) ) {
+            $log['deleted'] = 0;
+        }
+    }
+
 
     global $wpdb;
     $prefix = $wpdb->prefix;
@@ -107,7 +136,7 @@ function CMS24_delete_subscribers_from_trash() {
 
         //if $subscriber['deleted_at'] is more than 1 week ago delete from mailpoet_subscribers
         $date = new DateTime();
-        $date->modify('-1 hour');
+        $date->modify('-1 day');
         $date = $date->format('Y-m-d H:i:s');
 
         if ( $subscriber['deleted_at'] < $date ) {
@@ -115,21 +144,27 @@ function CMS24_delete_subscribers_from_trash() {
             $wpdb->delete( $prefix . 'mailpoet_subscriber_segment', array( 'subscriber_id' => $subscriber['id'] ) );
             $wpdb->delete( $prefix . 'mailpoet_subscriber_tag', array( 'subscriber_id' => $subscriber['id'] ) );
             $wpdb->delete( $prefix . 'mailpoet_subscriber_custom_field', array( 'subscriber_id' => $subscriber['id'] ) );
+
+            //add to log
+            $log['deleted'] = $log['deleted'] + 1;
+
         }
 
     }
+
+    //update log
+    update_option( 'cleanup_mailpoet_subscribers_log', $log );
 
 }
 
 
 /**
- * every hour run CMS24_move_subscribers_to_trash
- * status = 'inactive';
+ * every hour schedule events
  */
-
 add_action( 'init', 'CMS24_move_subscribers_to_trash_cron' );
 function CMS24_move_subscribers_to_trash_cron() {
 
+    //scheduled the diffrent events with 10 minute apart to avoid all events running at the same time
     if ( ! wp_next_scheduled( 'CMS24_delete_subscribers_from_trash_event' ) ) {
         wp_schedule_event( time(), 'hourly', 'CMS24_delete_subscribers_from_trash_event' );
     }
@@ -146,4 +181,59 @@ function CMS24_move_subscribers_to_trash_cron() {
     if ( ! wp_next_scheduled( 'CMS24_move_subscribers_to_trash_event', array( 'bounced' ) ) ) {
         wp_schedule_event( time(), 'hourly', 'CMS24_move_subscribers_to_trash_event', array( 'bounced' ) );
     }
+}
+
+/**
+ * Activate the plugin
+ */
+register_activation_hook( __FILE__, 'CMS24_activate' );
+function CMS24_activate() {
+    
+    //scheduled the diffrent events with 10 minute apart to avoid all events running at the same time
+    if ( ! wp_next_scheduled( 'CMS24_delete_subscribers_from_trash_event' ) ) {
+        wp_schedule_event( time() + 600, 'hourly', 'CMS24_delete_subscribers_from_trash_event' );
+    }
+
+    if ( ! wp_next_scheduled( 'CMS24_move_subscribers_to_trash_event', array( 'inactive' ) ) ) {
+        wp_schedule_event( time() + 1200, 'hourly', 'CMS24_move_subscribers_to_trash_event', array( 'inactive' ) );
+    }
+
+    if ( ! wp_next_scheduled( 'CMS24_move_subscribers_to_trash_event', array( 'unconfirmed' ) ) ) {
+        wp_schedule_event( time() + 1800, 'hourly', 'CMS24_move_subscribers_to_trash_event', array( 'unconfirmed' ) );
+    }
+
+    if ( ! wp_next_scheduled( 'CMS24_move_subscribers_to_trash_event', array( 'unsubscribed' ) ) ) {
+        wp_schedule_event( time() + 2400, 'hourly', 'CMS24_move_subscribers_to_trash_event', array( 'unsubscribed' ) );
+    }
+
+    if ( ! wp_next_scheduled( 'CMS24_move_subscribers_to_trash_event', array( 'bounced' ) ) ) {
+        wp_schedule_event( time() + 3000, 'hourly', 'CMS24_move_subscribers_to_trash_event', array( 'bounced' ) );
+    }
+
+}
+
+/**
+ * Deactivate the plugin
+ * remove all scheduled events
+ */
+register_deactivation_hook( __FILE__, 'CMS24_deactivate' );
+function CMS24_deactivate() {
+    wp_clear_scheduled_hook( 'CMS24_delete_subscribers_from_trash_event' );
+    wp_clear_scheduled_hook( 'CMS24_move_subscribers_to_trash_event', array( 'inactive' ) );
+    wp_clear_scheduled_hook( 'CMS24_move_subscribers_to_trash_event', array( 'unconfirmed' ) );
+    wp_clear_scheduled_hook( 'CMS24_move_subscribers_to_trash_event', array( 'unsubscribed' ) );
+    wp_clear_scheduled_hook( 'CMS24_move_subscribers_to_trash_event', array( 'bounced' ) );
+}
+
+/**
+ * Uninstall the plugin
+ */
+register_uninstall_hook( __FILE__, 'CMS24_uninstall' );
+function CMS24_uninstall() {
+    wp_clear_scheduled_hook( 'CMS24_delete_subscribers_from_trash_event' );
+    wp_clear_scheduled_hook( 'CMS24_move_subscribers_to_trash_event', array( 'inactive' ) );
+    wp_clear_scheduled_hook( 'CMS24_move_subscribers_to_trash_event', array( 'unconfirmed' ) );
+    wp_clear_scheduled_hook( 'CMS24_move_subscribers_to_trash_event', array( 'unsubscribed' ) );
+    wp_clear_scheduled_hook( 'CMS24_move_subscribers_to_trash_event', array( 'bounced' ) );
+    delete_option( 'cleanup_mailpoet_subscribers_log' );
 }
