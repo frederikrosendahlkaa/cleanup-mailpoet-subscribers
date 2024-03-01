@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: Cleanup MailPoet subscribers
- * Description: Subscribers with status Inactive and Unconfirmed is moved to trash after 1 week. | Unsubscribed and Bounced is moved to trash after 1 hour. | Subscribers in trash is deleted after 1 hour.
+ * Description: Subscribers with status Inactive and Unconfirmed is moved to trash after 1 week. | Unsubscribed and Bounced is moved to trash after 1 hour. | Subscribers in trash is deleted after 1 day.
  * Version: 1.0.0
  * Author: Nordic Custom Made
  * Author URI: https://nordiccustommade.dk
