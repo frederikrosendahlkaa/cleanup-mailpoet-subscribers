@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Cleanup MailPoet subscribers
- * Description: Subscribers with status Inactive and Unconfirmed is moved to trash after 1 week. | Unsubscribed and Bounced is moved to trash after 1 hour. | Subscribers in trash is deleted after 1 day.
- * Version: 1.0.0
+ * Description: Automatically cleans up inactive MailPoet subscribers and provides manual cleanup tools in the MailPoet menu.
+ * Version: 1.1.0
  * Author: Nordic Custom Made
  * Author URI: https://nordiccustommade.dk
  * Requires Plugins: mailpoet
@@ -10,230 +10,446 @@
  * License URI: https://www.gnu.org/licenses/gpl-3.0.html
  */
 
-// Exit if accessed directly.
 if ( ! defined( 'ABSPATH' ) ) {
-    exit;
+	exit;
+}
+
+define( 'NCM_MAILPOET_CLEANUP_PAGE_SLUG', 'mailpoet-cleanup-subscribers' );
+define( 'NCM_MAILPOET_CLEANUP_CAPABILITY', 'mailpoet_manage_subscribers' );
+define( 'NCM_MAILPOET_CLEANUP_BATCH_SIZE', 1000 );
+define( 'NCM_MAILPOET_CLEANUP_MAX_BATCHES', 10 );
+
+/**
+ * Statuses managed by this plugin.
+ *
+ * @return array<string, array<string, int|string>>
+ */
+function ncm_mailpoet_cleanup_statuses() {
+	return array(
+		'inactive'     => array( 'label' => 'Inaktiv', 'age' => WEEK_IN_SECONDS ),
+		'unconfirmed'  => array( 'label' => 'Ubekræftet', 'age' => WEEK_IN_SECONDS ),
+		'unsubscribed' => array( 'label' => 'Afmeldt', 'age' => HOUR_IN_SECONDS ),
+		'bounced'      => array( 'label' => 'Afvist', 'age' => HOUR_IN_SECONDS ),
+	);
 }
 
 /**
- * https://github.com/mailpoet/mailpoet/tree/trunk/doc
- * Cron job to move inactive subscribers to the trash
+ * Get MailPoet's public subscriber repository service.
+ *
+ * @return object|false
  */
+function ncm_mailpoet_get_subscribers_repository() {
+	if (
+		! class_exists( '\MailPoet\DI\ContainerWrapper' ) ||
+		! class_exists( '\MailPoet\Subscribers\SubscribersRepository' )
+	) {
+		return false;
+	}
 
-add_action( 'ncm_mailpoet_move_subscribers_to_trash', 'ncm_mailpoet_move_subscribers_to_trash', 10, 1);
+	try {
+		return \MailPoet\DI\ContainerWrapper::getInstance()->get(
+			\MailPoet\Subscribers\SubscribersRepository::class
+		);
+	} catch ( Throwable $error ) {
+		return false;
+	}
+}
+
+/**
+ * Return eligible subscriber IDs in a bounded batch.
+ *
+ * WordPress users and WooCommerce customers are always protected.
+ *
+ * @param string      $location Either active or trash.
+ * @param string|null $status   Optional MailPoet status.
+ * @param string|null $cutoff   Optional maximum updated_at value.
+ * @param int         $limit    Maximum number of IDs.
+ * @return int[]
+ */
+function ncm_mailpoet_get_eligible_ids( $location, $status = null, $cutoff = null, $limit = NCM_MAILPOET_CLEANUP_BATCH_SIZE ) {
+	global $wpdb;
+
+	$table = $wpdb->prefix . 'mailpoet_subscribers';
+	$where = array( 'wp_user_id IS NULL', 'is_woocommerce_user = 0' );
+	$args  = array();
+
+	$where[] = 'trash' === $location ? 'deleted_at IS NOT NULL' : 'deleted_at IS NULL';
+
+	if ( null !== $status ) {
+		$where[] = 'status = %s';
+		$args[]  = $status;
+	}
+
+	if ( null !== $cutoff ) {
+		$where[] = 'updated_at < %s';
+		$args[]  = $cutoff;
+	}
+
+	$args[] = max( 1, (int) $limit );
+	$sql    = "SELECT id FROM {$table} WHERE " . implode( ' AND ', $where ) . ' ORDER BY id ASC LIMIT %d';
+	$query  = $wpdb->prepare( $sql, $args ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+
+	return array_map( 'intval', $wpdb->get_col( $query ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+}
+
+/**
+ * Process subscribers through MailPoet in batches.
+ *
+ * @param string      $operation Either trash or delete.
+ * @param string|null $status    Optional status for trash operations.
+ * @param string|null $cutoff    Optional maximum updated_at value.
+ * @param int         $max_batches Safety limit for a single request.
+ * @return int|WP_Error Number processed or an error.
+ */
+function ncm_mailpoet_process_batches( $operation, $status = null, $cutoff = null, $max_batches = NCM_MAILPOET_CLEANUP_MAX_BATCHES ) {
+	$repository = ncm_mailpoet_get_subscribers_repository();
+	if ( ! $repository ) {
+		return new WP_Error( 'mailpoet_unavailable', 'MailPoet kunne ikke indlæses.' );
+	}
+
+	$processed = 0;
+	$location  = 'delete' === $operation ? 'trash' : 'active';
+
+	for ( $batch = 0; $batch < $max_batches; $batch++ ) {
+		$ids = ncm_mailpoet_get_eligible_ids( $location, $status, $cutoff );
+		if ( empty( $ids ) ) {
+			break;
+		}
+
+		try {
+			$processed += 'delete' === $operation
+				? (int) $repository->bulkDelete( $ids )
+				: (int) $repository->bulkTrash( $ids );
+		} catch ( Throwable $error ) {
+			return new WP_Error( 'mailpoet_cleanup_failed', $error->getMessage() );
+		}
+
+		if ( count( $ids ) < NCM_MAILPOET_CLEANUP_BATCH_SIZE ) {
+			break;
+		}
+	}
+
+	return $processed;
+}
+
+/**
+ * Count subscribers for the cleanup screen.
+ *
+ * @param string      $location Either active or trash.
+ * @param string|null $status   Optional status.
+ * @param string|null $cutoff   Optional maximum updated_at value.
+ * @param bool        $eligible_only Whether to exclude protected users.
+ * @return int
+ */
+function ncm_mailpoet_count_subscribers( $location, $status = null, $cutoff = null, $eligible_only = false ) {
+	global $wpdb;
+
+	$table = $wpdb->prefix . 'mailpoet_subscribers';
+	$where = array( 'trash' === $location ? 'deleted_at IS NOT NULL' : 'deleted_at IS NULL' );
+	$args  = array();
+
+	if ( $eligible_only ) {
+		$where[] = 'wp_user_id IS NULL';
+		$where[] = 'is_woocommerce_user = 0';
+	}
+
+	if ( null !== $status ) {
+		$where[] = 'status = %s';
+		$args[]  = $status;
+	}
+
+	if ( null !== $cutoff ) {
+		$where[] = 'updated_at < %s';
+		$args[]  = $cutoff;
+	}
+
+	$sql = "SELECT COUNT(*) FROM {$table} WHERE " . implode( ' AND ', $where );
+	if ( ! empty( $args ) ) {
+		$sql = $wpdb->prepare( $sql, $args ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	}
+
+	return (int) $wpdb->get_var( $sql ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+}
+
+/**
+ * Move old subscribers with a specific status to trash.
+ *
+ * @param string $status MailPoet subscriber status.
+ */
 function ncm_mailpoet_move_subscribers_to_trash( $status ) {
+	$statuses = ncm_mailpoet_cleanup_statuses();
+	if ( ! isset( $statuses[ $status ] ) ) {
+		return;
+	}
 
-    //get log from options
-    $log = get_option( 'cleanup_mailpoet_subscribers_log' );
-    if ( ! $log ) {
-        $log = array();
-        $log[$status] = 0;
-    } else {
-        if ( !key_exists( $status, $log ) ) {
-            $log[$status] = 0;
-        }
-    }
+	$cutoff = gmdate( 'Y-m-d H:i:s', time() - (int) $statuses[ $status ]['age'] );
+	$result = ncm_mailpoet_process_batches( 'trash', $status, $cutoff );
+	if ( is_wp_error( $result ) || 0 === $result ) {
+		return;
+	}
 
-    $mailpoet_api = false;
-    if (class_exists(\MailPoet\API\API::class)) {
-        $mailpoet_api = \MailPoet\API\API::MP('v1');
-    }
-
-    if ( !$mailpoet_api ) {
-        return;
-    }
-
-    //dateime 1 week ago
-    $date = new DateTime();
-    $date->modify('-1 week');
-    $date = $date->format('Y-m-d H:i:s');
-
-    if ( $status === 'unsubscribed' || $status === 'bounced') {
-        //set date to 1 hour ago
-        $date = new DateTime();
-        $date->modify('-1 hour');
-        $date = $date->format('Y-m-d H:i:s');
-    }
-
-    //get all subscribers with status $args['status']
-
-    $subscribers = $mailpoet_api->getSubscribers( array( 'status' => $status ) );
-    
-    if ( empty( $subscribers ) ) {
-        return;
-    }
-
-    global $wpdb;
-    $prefix = $wpdb->prefix;
-
-    foreach ( $subscribers as $subscriber ) {
-
-        if ( $subscriber['wp_user_id'] || $subscriber['is_woocommerce_user']) {
-            continue;
-        }
-
-        //if $subscriber['updated_at'] is less than $date move to trash
-        if ( $subscriber['updated_at'] < $date ) {
-            //in $prefix . 'mailpoet_subscribers' column 'deleted_at' set to now
-            $wpdb->update( $prefix . 'mailpoet_subscribers', array( 'deleted_at' => current_time( 'mysql' ) ), array( 'id' => $subscriber['id'] ) );
-
-            //add to log
-            $log[$status] = $log[$status] + 1;
-
-        }
-
-    }
-
-    //update log
-    update_option( 'cleanup_mailpoet_subscribers_log', $log );
-
+	$log            = (array) get_option( 'cleanup_mailpoet_subscribers_log', array() );
+	$log[ $status ] = isset( $log[ $status ] ) ? (int) $log[ $status ] + $result : $result;
+	update_option( 'cleanup_mailpoet_subscribers_log', $log );
 }
+add_action( 'ncm_mailpoet_move_subscribers_to_trash', 'ncm_mailpoet_move_subscribers_to_trash', 10, 1 );
 
 /**
- * every hour run ncm_mailpoet_delete_subscribers_from_trash
+ * Permanently delete eligible subscribers that have been in trash for a day.
  */
-add_action( 'ncm_mailpoet_delete_subscribers_from_trash', 'ncm_mailpoet_delete_subscribers_from_trash' );
 function ncm_mailpoet_delete_subscribers_from_trash() {
+	global $wpdb;
 
-    $mailpoet_api = false;
-    if (class_exists(\MailPoet\API\API::class)) {
-        $mailpoet_api = \MailPoet\API\API::MP('v1');
-    }
+	$table  = $wpdb->prefix . 'mailpoet_subscribers';
+	$cutoff = gmdate( 'Y-m-d H:i:s', time() - DAY_IN_SECONDS );
+	$ids    = array_map(
+		'intval',
+		$wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT id FROM {$table}
+				WHERE deleted_at IS NOT NULL
+				AND deleted_at < %s
+				AND wp_user_id IS NULL
+				AND is_woocommerce_user = 0
+				ORDER BY id ASC
+				LIMIT %d",
+				$cutoff,
+				NCM_MAILPOET_CLEANUP_BATCH_SIZE * NCM_MAILPOET_CLEANUP_MAX_BATCHES
+			)
+		)
+	);
 
-    //get log from options
-    $log = get_option( 'cleanup_mailpoet_subscribers_log' );
-    if ( ! $log ) {
-        $log = array();
-        $log['deleted'] = 0;
-    } else {
-        if ( !key_exists( 'deleted', $log ) ) {
-            $log['deleted'] = 0;
-        }
-    }
+	if ( empty( $ids ) ) {
+		return;
+	}
 
+	$repository = ncm_mailpoet_get_subscribers_repository();
+	if ( ! $repository ) {
+		return;
+	}
 
-    global $wpdb;
-    $prefix = $wpdb->prefix;
+	$deleted = 0;
+	foreach ( array_chunk( $ids, NCM_MAILPOET_CLEANUP_BATCH_SIZE ) as $batch ) {
+		try {
+			$deleted += (int) $repository->bulkDelete( $batch );
+		} catch ( Throwable $error ) {
+			break;
+		}
+	}
 
-    //get all subscribers from $prefix . 'mailpoet_subscribers' where 'deleted_at' is not null return ID and deleted_at
-    $subscribers = $wpdb->get_results( "SELECT id, deleted_at FROM " . $prefix . "mailpoet_subscribers WHERE deleted_at IS NOT NULL", ARRAY_A );
-
-    if ( empty( $subscribers ) ) {
-        return;
-    }
-
-    foreach ( $subscribers as $subscriber ) {
-
-        $get_subscriber = $mailpoet_api->getSubscriber( $subscriber['id'] );
-
-        if ( empty( $get_subscriber ) ) {
-            continue;
-        }
-
-        if ( $get_subscriber['wp_user_id'] || $get_subscriber['is_woocommerce_user']) {
-            continue;
-        }
-
-        //if $subscriber['deleted_at'] is more than 1 week ago delete from mailpoet_subscribers
-        $date = new DateTime();
-        $date->modify('-1 day');
-        $date = $date->format('Y-m-d H:i:s');
-
-        if ( $subscriber['deleted_at'] < $date ) {
-            $wpdb->delete( $prefix . 'mailpoet_subscribers', array( 'id' => $subscriber['id'] ) );
-            $wpdb->delete( $prefix . 'mailpoet_subscriber_segment', array( 'subscriber_id' => $subscriber['id'] ) );
-            $wpdb->delete( $prefix . 'mailpoet_subscriber_tag', array( 'subscriber_id' => $subscriber['id'] ) );
-            $wpdb->delete( $prefix . 'mailpoet_subscriber_custom_field', array( 'subscriber_id' => $subscriber['id'] ) );
-
-            //add to log
-            $log['deleted'] = $log['deleted'] + 1;
-
-        }
-
-    }
-
-    //update log
-    update_option( 'cleanup_mailpoet_subscribers_log', $log );
-
+	if ( $deleted > 0 ) {
+		$log            = (array) get_option( 'cleanup_mailpoet_subscribers_log', array() );
+		$log['deleted'] = isset( $log['deleted'] ) ? (int) $log['deleted'] + $deleted : $deleted;
+		update_option( 'cleanup_mailpoet_subscribers_log', $log );
+	}
 }
+add_action( 'ncm_mailpoet_delete_subscribers_from_trash', 'ncm_mailpoet_delete_subscribers_from_trash' );
 
+/** Register the cleanup page beneath MailPoet. */
+function ncm_mailpoet_cleanup_admin_menu() {
+	add_submenu_page(
+		'mailpoet-homepage',
+		'MailPoet-oprydning',
+		'Oprydning',
+		NCM_MAILPOET_CLEANUP_CAPABILITY,
+		NCM_MAILPOET_CLEANUP_PAGE_SLUG,
+		'ncm_mailpoet_render_cleanup_page'
+	);
+}
+add_action( 'admin_menu', 'ncm_mailpoet_cleanup_admin_menu', 100 );
 
 /**
- * every hour schedule events
+ * Render one secure action form.
+ *
+ * @param string $operation Action name.
+ * @param string $label Button label.
+ * @param string $confirm Confirmation prompt.
+ * @param string $status Optional status.
+ * @param bool   $primary Whether to use the primary button style.
+ * @param bool   $disabled Whether the button should be disabled.
  */
-add_action( 'init', 'ncm_mailpoet_cron_schedule' );
+function ncm_mailpoet_cleanup_action_form( $operation, $label, $confirm, $status = '', $primary = false, $disabled = false ) {
+	?>
+	<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline-block">
+		<input type="hidden" name="action" value="ncm_mailpoet_cleanup">
+		<input type="hidden" name="cleanup_operation" value="<?php echo esc_attr( $operation ); ?>">
+		<?php if ( '' !== $status ) : ?>
+			<input type="hidden" name="subscriber_status" value="<?php echo esc_attr( $status ); ?>">
+		<?php endif; ?>
+		<?php wp_nonce_field( 'ncm_mailpoet_cleanup_action' ); ?>
+		<button type="submit" class="button <?php echo $primary ? 'button-primary' : ''; ?>" onclick="return confirm('<?php echo esc_js( $confirm ); ?>');" <?php disabled( $disabled ); ?>><?php echo esc_html( $label ); ?></button>
+	</form>
+	<?php
+}
+
+/** Render the MailPoet cleanup overview. */
+function ncm_mailpoet_render_cleanup_page() {
+	if ( ! current_user_can( NCM_MAILPOET_CLEANUP_CAPABILITY ) ) {
+		wp_die( esc_html__( 'Sorry, you are not allowed to access this page.' ), '', array( 'response' => 403 ) );
+	}
+
+	$statuses = ncm_mailpoet_cleanup_statuses();
+	?>
+	<div class="wrap">
+		<h1>MailPoet-oprydning</h1>
+		<p>WordPress-brugere og WooCommerce-kunder er beskyttet og bliver aldrig behandlet af disse handlinger.</p>
+
+		<?php if ( isset( $_GET['cleanup_result'] ) ) : // phpcs:ignore WordPress.Security.NonceVerification.Recommended ?>
+			<?php
+			$result    = sanitize_key( wp_unslash( $_GET['cleanup_result'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			$processed = isset( $_GET['processed'] ) ? absint( $_GET['processed'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			$remaining = isset( $_GET['remaining'] ) ? absint( $_GET['remaining'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			$message   = 'success' === $result
+				? sprintf(
+					'%1$s abonnenter blev behandlet.%2$s',
+					number_format_i18n( $processed ),
+					$remaining > 0 ? ' Der er stadig ' . number_format_i18n( $remaining ) . ' egnede tilbage; kør handlingen igen.' : ''
+				)
+				: 'Oprydningen kunne ikke gennemføres. Kontrollér, at MailPoet er aktivt.';
+			?>
+			<div class="notice notice-<?php echo 'success' === $result ? 'success' : 'error'; ?> is-dismissible"><p><?php echo esc_html( $message ); ?></p></div>
+		<?php endif; ?>
+
+		<h2>Aktive statusser</h2>
+		<table class="widefat striped" style="max-width:1100px">
+			<thead><tr><th>Status</th><th>Samlet</th><th>Kan flyttes</th><th>Opfylder tidsgrænsen nu</th><th>Automatisk grænse</th><th>Manuel handling</th></tr></thead>
+			<tbody>
+				<?php foreach ( $statuses as $status => $config ) : ?>
+					<?php
+					$cutoff   = gmdate( 'Y-m-d H:i:s', time() - (int) $config['age'] );
+					$total    = ncm_mailpoet_count_subscribers( 'active', $status );
+					$eligible = ncm_mailpoet_count_subscribers( 'active', $status, null, true );
+					$due      = ncm_mailpoet_count_subscribers( 'active', $status, $cutoff, true );
+					$age      = WEEK_IN_SECONDS === (int) $config['age'] ? '1 uge' : '1 time';
+					?>
+					<tr>
+						<td><strong><?php echo esc_html( $config['label'] ); ?></strong></td>
+						<td><?php echo esc_html( number_format_i18n( $total ) ); ?></td>
+						<td><?php echo esc_html( number_format_i18n( $eligible ) ); ?></td>
+						<td><?php echo esc_html( number_format_i18n( $due ) ); ?></td>
+						<td><?php echo esc_html( $age ); ?> efter seneste opdatering</td>
+						<td>
+							<?php
+							ncm_mailpoet_cleanup_action_form(
+								'trash_status',
+								'Flyt alle til papirkurven',
+								'Dette flytter alle egnede abonnenter med statussen ' . $config['label'] . ' til papirkurven, også dem der endnu ikke har nået tidsgrænsen. Fortsæt?',
+								$status,
+								false,
+								0 === $eligible
+							);
+							?>
+						</td>
+					</tr>
+				<?php endforeach; ?>
+			</tbody>
+		</table>
+
+		<?php
+		$trash_total    = ncm_mailpoet_count_subscribers( 'trash' );
+		$trash_eligible = ncm_mailpoet_count_subscribers( 'trash', null, null, true );
+		?>
+		<h2>Papirkurv</h2>
+		<p>Der er <strong><?php echo esc_html( number_format_i18n( $trash_total ) ); ?></strong> abonnenter i papirkurven. <strong><?php echo esc_html( number_format_i18n( $trash_eligible ) ); ?></strong> kan slettes permanent.</p>
+		<?php
+		ncm_mailpoet_cleanup_action_form(
+			'empty_trash',
+			'Tøm papirkurven permanent',
+			'Denne handling sletter alle egnede abonnenter i MailPoets papirkurv permanent og kan ikke fortrydes. Fortsæt?',
+			'',
+			true,
+			0 === $trash_eligible
+		);
+		?>
+	</div>
+	<?php
+}
+
+/** Handle manual cleanup requests. */
+function ncm_mailpoet_handle_cleanup_action() {
+	if ( ! current_user_can( NCM_MAILPOET_CLEANUP_CAPABILITY ) ) {
+		wp_die( esc_html__( 'Sorry, you are not allowed to do that.' ), '', array( 'response' => 403 ) );
+	}
+
+	check_admin_referer( 'ncm_mailpoet_cleanup_action' );
+
+	$operation = isset( $_POST['cleanup_operation'] ) ? sanitize_key( wp_unslash( $_POST['cleanup_operation'] ) ) : '';
+	$result    = new WP_Error( 'invalid_operation', 'Ugyldig handling.' );
+	$remaining = 0;
+
+	if ( 'trash_status' === $operation ) {
+		$status   = isset( $_POST['subscriber_status'] ) ? sanitize_key( wp_unslash( $_POST['subscriber_status'] ) ) : '';
+		$statuses = ncm_mailpoet_cleanup_statuses();
+		if ( isset( $statuses[ $status ] ) ) {
+			$result = ncm_mailpoet_process_batches( 'trash', $status );
+			if ( ! is_wp_error( $result ) ) {
+				$remaining = ncm_mailpoet_count_subscribers( 'active', $status, null, true );
+			}
+		}
+	} elseif ( 'empty_trash' === $operation ) {
+		$result = ncm_mailpoet_process_batches( 'delete' );
+		if ( ! is_wp_error( $result ) ) {
+			$remaining = ncm_mailpoet_count_subscribers( 'trash', null, null, true );
+		}
+	}
+
+	$redirect_args = array(
+		'page'           => NCM_MAILPOET_CLEANUP_PAGE_SLUG,
+		'cleanup_result' => is_wp_error( $result ) ? 'error' : 'success',
+		'processed'      => is_wp_error( $result ) ? 0 : (int) $result,
+		'remaining'      => $remaining,
+	);
+
+	wp_safe_redirect( add_query_arg( $redirect_args, admin_url( 'admin.php' ) ) );
+	exit;
+}
+add_action( 'admin_post_ncm_mailpoet_cleanup', 'ncm_mailpoet_handle_cleanup_action' );
+
+/** Schedule hourly cleanup events. */
 function ncm_mailpoet_cron_schedule() {
+	if ( ! wp_next_scheduled( 'ncm_mailpoet_delete_subscribers_from_trash' ) ) {
+		wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_delete_subscribers_from_trash' );
+	}
 
-    //scheduled the diffrent events with 10 minute apart to avoid all events running at the same time
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_delete_subscribers_from_trash' ) ) {
-        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_delete_subscribers_from_trash' );
-    }
-
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) ) ) {
-        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) );
-    }
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) ) ) {
-        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) );
-    }
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) ) ) {
-        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) );
-    }
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) ) ) {
-        wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) );
-    }
+	foreach ( array_keys( ncm_mailpoet_cleanup_statuses() ) as $status ) {
+		if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( $status ) ) ) {
+			wp_schedule_event( time(), 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( $status ) );
+		}
+	}
 }
+add_action( 'init', 'ncm_mailpoet_cron_schedule' );
 
-/**
- * Activate the plugin
- */
-register_activation_hook( __FILE__, 'ncm_mailpoet_activate' );
+/** Schedule staggered cleanup events on activation. */
 function ncm_mailpoet_activate() {
-    
-    //scheduled the diffrent events with 10 minute apart to avoid all events running at the same time
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_delete_subscribers_from_trash' ) ) {
-        wp_schedule_event( time() + 600, 'hourly', 'ncm_mailpoet_delete_subscribers_from_trash' );
-    }
+	if ( ! wp_next_scheduled( 'ncm_mailpoet_delete_subscribers_from_trash' ) ) {
+		wp_schedule_event( time() + 600, 'hourly', 'ncm_mailpoet_delete_subscribers_from_trash' );
+	}
 
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) ) ) {
-        wp_schedule_event( time() + 1200, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) );
-    }
+	$delay = 1200;
+	foreach ( array_keys( ncm_mailpoet_cleanup_statuses() ) as $status ) {
+		if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( $status ) ) ) {
+			wp_schedule_event( time() + $delay, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( $status ) );
+		}
+		$delay += 600;
+	}
+}
+register_activation_hook( __FILE__, 'ncm_mailpoet_activate' );
 
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) ) ) {
-        wp_schedule_event( time() + 1800, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) );
-    }
-
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) ) ) {
-        wp_schedule_event( time() + 2400, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) );
-    }
-
-    if ( ! wp_next_scheduled( 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) ) ) {
-        wp_schedule_event( time() + 3000, 'hourly', 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) );
-    }
-
+/** Clear all scheduled events. */
+function ncm_mailpoet_clear_scheduled_events() {
+	wp_clear_scheduled_hook( 'ncm_mailpoet_delete_subscribers_from_trash' );
+	foreach ( array_keys( ncm_mailpoet_cleanup_statuses() ) as $status ) {
+		wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( $status ) );
+	}
 }
 
-/**
- * Deactivate the plugin
- * remove all scheduled events
- */
-register_deactivation_hook( __FILE__, 'ncm_mailpoet_deactivate' );
 function ncm_mailpoet_deactivate() {
-    wp_clear_scheduled_hook( 'ncm_mailpoet_delete_subscribers_from_trash' );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) );
+	ncm_mailpoet_clear_scheduled_events();
 }
+register_deactivation_hook( __FILE__, 'ncm_mailpoet_deactivate' );
 
-/**
- * Uninstall the plugin
- */
-register_uninstall_hook( __FILE__, 'ncm_mailpoet_uninstall' );
 function ncm_mailpoet_uninstall() {
-    wp_clear_scheduled_hook( 'ncm_mailpoet_delete_subscribers_from_trash' );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'inactive' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unconfirmed' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'unsubscribed' ) );
-    wp_clear_scheduled_hook( 'ncm_mailpoet_move_subscribers_to_trash', array( 'bounced' ) );
-    delete_option( 'cleanup_mailpoet_subscribers_log' );
+	ncm_mailpoet_clear_scheduled_events();
+	delete_option( 'cleanup_mailpoet_subscribers_log' );
 }
+register_uninstall_hook( __FILE__, 'ncm_mailpoet_uninstall' );
